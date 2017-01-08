@@ -1,0 +1,322 @@
+---
+title: "Sales_Prediction"
+author: "Bowei.Zhang"
+date: "Janurary 9, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Background and Introduction  
+
+One of my clients is an E-commerce company, they will launch new sales on their site every day. Each sale is a collection of products, basically they want me to do the predictions on their female shoes sales based on their historical data.They will use the prediction to guide their inventory and price in the future sales.
+
+Below is a **quick demo & model prototype** that I built for them base on **3 months** historical data
+
+Data Dictionary:  
+
+**num_units_sold** = This is the target variable. Number corresponds to the number of units per product look that were sold in a single sale.  
+**product_look_id** = Identifies each product look. Note that one single product look can be in multiple sales.  
+**sale_id** = identifies each sale. There should be multiple product look id's per sale.  
+**id** = concatenation of product\_look\_id and sale\_id, serves as unique identifier for each row. Num\_units\_sold corresponds to this unique id.  
+**sale_start_time** = Time that sale begins, in EST  
+**sale_end_time** = Time that sale ends, in EST  
+**sale_type_key** = Type of sale can be single-brand (entire sale is one brand name), multi-brand (sale is organized around a theme and has multiple brands) or structured (splits sale into sizes or category)  
+**brand_id** = identifier for brand name  
+**shoe_type** = the style of the shoe  
+**return_policy_id** = The type of return policy associated with the product look  
+**base_price** = The price E-commerce company paid to buy the product  
+**sale_price** = The price that customers purchase the product for  
+**MSRP_price** = The manufacturer's suggested retail price. The full, non-discounted price that the brand would typically charge for their product.  
+**initial_sale_price** = All of the product looks in this dataset are repeats, meaning they have been on sale on their website before. This is the sale price of the product look the first time it was ever offered.  
+**last_price** = the sale price of the product look the previous time it was offered.  
+**material_name** = all the materials that the product is made of  
+**color** = color of the product  
+**country of origin** = country where product was manufactured  
+**num_sizes** = number of sizes available for that product look  
+**num_units_available** = number of total units per product look that are available for customer to buy  
+  
+From the data dictionary that we could know we need to predict **num_units_sold** based on other variables  
+
+  
+Required Packages:
+```{r packages, message=FALSE, warning=FALSE}
+require(Matrix)   # For construting binary variables from categorical variables (One-hot encoding)
+require(xgboost)  # For XGBoosting model
+require(dplyr)    # For data wrangling
+require(caTools)  # For stratify sampling
+```
+
+### Algorithm Selection
+
+Period is not long enough for time series analysis.
+
+Dependent variable **num_units_sold** is a **continuous** variable, so it is a **regression** question.
+
+Independent variables are multi-types, there might be both linear and non-linear relationships, instead of **pure linear regression**, it is better to use **regression tree**.
+Tree based model also pretty robust to **multicollinearity**.
+
+In order to improve the accuracy and prediction power of the model, I would like to use assemble method, specifically, **XGBoost**, since its high performance and speed.
+
+
+
+
+### Data Preparation
+
+```{r input}
+# Set working dictionary to target folder
+setwd("C:\\Users\\bowei.zhang\\Desktop\\ME\\Career\\Analytics_Example\\Sale_Pridiction")
+
+
+# read sample data, and change all blanks into 'NA'
+sales <- read.csv("C:\\Users\\bowei.zhang\\Desktop\\ME\\Career\\Analytics_Example\\Sale_Pridiction/sales.csv", header=T, na.strings=c("","NA"))
+
+# Look at the size of the data and data type of each variables
+str(sales)
+
+# Take a look at typical value of each variables
+summary(sales)
+
+
+# Data cleaning
+
+unique(sales$shoe_type)
+
+sales$shoe_type[sales$shoe_type == "ballet flat"] <- "ballet flats"
+sales$shoe_type[sales$shoe_type == "pump"] <- "pumps"
+sales$shoe_type[sales$shoe_type == "sandal"] <- "sandals"
+
+
+```
+### Feature Engineering  
+
+Since **XGBoost** only take **numerical variables**, there are lots of categorical variables in the model, I need to do some feature transformations here:     
+1. For categorical variables with less levels, I will convert them into binary dummy variables;   
+2. For categorical variables with more levels, I will calculate the average sale of each level and use those to represent that variable.
+
+#### Create new variables
+```{r Create_new_variables}
+# Price related new variables
+sales$msrp_discount <- sales$sale_price/sales$msrp_price
+
+sales$initial_discount <-   sales$sale_price/sales$initial_sale_price
+
+sales$profit <- sales$sale_price - sales$base_price
+
+
+# Time related new variables
+sales$sale_duration <- as.numeric(difftime(as.POSIXlt(sales$sale_end_time, format="%Y-%M-%d %H:%M:%S"), as.POSIXlt(sales$sale_start_time, format="%Y-%M-%d %H:%M:%S"), units="hours"))
+
+sales$sale_month <- months(as.Date(sales$sale_start_time))
+
+# New product categories
+sales <- mutate(sales,brand_shoe_type = paste(brand_id,shoe_type, sep = '_'))
+
+sales <- mutate(sales,brand_shoe_type_sale_type = paste(brand_id,shoe_type,sale_type_key, sep = '_'))
+
+sales <- mutate(sales,brand_shoe_type_sale_type_color = paste(brand_id,shoe_type,sale_type_key,color, sep = '_'))
+
+
+```
+
+Does sales time sensitive? (Seasonality)
+```{r seasonality}
+sales %>% group_by(sale_month) %>% summarise(month_avg=mean(num_units_sold))
+```
+It looks like sales do have some sensitive to month(Jan. is a little bit higher than Feb. and Mar.), so `sale_month` variable should be able to catch this relationship.  
+
+
+#### Delete useless variables
+```{r Delete_useless_variables}
+
+# Drop meaningless (in terms of modeling) variables from dataset
+drops <- c("sale_id","id","sale_start_time","sale_end_time")
+sales <- sales[ , !(names(sales) %in% drops)]
+
+```
+
+
+#### Convert categorical variables into numerical variables  
+
+##### Convert `product_look_id`,`brand_id`,`material_name`,`country_of_origin`,`color`,`brand_shoe_type`,`brand_shoe_type_sale_type`,`brand_shoe_type_sale_type_color` into average sales  
+
+Before we do this, let's split the dataset into training (80%) and test (20%) first:  
+```{r split,message=FALSE,warning=FALSE}
+# Stratify sampling based on time
+train_rows = sample.split(sales$sale_month, SplitRatio=0.80)
+train = na.omit(sales[ train_rows,])
+test  = na.omit(sales[!train_rows,])
+
+```
+
+Then average the corresponding variables for both train and test data 
+
+```{r Convert_categorical1,message=FALSE,warning=FALSE}
+############################################### Train dataset #############################################################
+# Make lookup tables 
+product_look_id_lookup <- train %>% group_by(product_look_id) %>% summarise(product_look_id_avg=mean(num_units_sold))
+
+brand_id_lookup <- train %>% group_by(brand_id) %>% summarise(brand_id_avg=mean(num_units_sold))
+
+material_name_lookup <- train %>% group_by(material_name) %>% summarise(material_name_avg=mean(num_units_sold))
+
+country_of_origin_lookup <- train %>% group_by(country_of_origin) %>% summarise(country_of_origin_avg=mean(num_units_sold))
+
+color_lookup <- train %>% group_by(color) %>% summarise(color_avg=mean(num_units_sold))
+
+brand_shoe_type_lookup <- train %>% group_by(brand_shoe_type) %>% summarise(brand_shoe_type_avg=mean(num_units_sold))
+
+brand_shoe_type_sale_type_lookup <- train %>% group_by(brand_shoe_type_sale_type) %>% summarise(brand_shoe_type_sale_type_avg=mean(num_units_sold))
+
+brand_shoe_type_sale_type_color_lookup <- train %>% group_by(brand_shoe_type_sale_type_color) %>% summarise(brand_shoe_type_sale_type_color_avg=mean(num_units_sold))
+
+
+# Join lookup tables with train data
+lookups <- list(train, product_look_id_lookup, brand_id_lookup,material_name_lookup,country_of_origin_lookup,color_lookup,brand_shoe_type_lookup,brand_shoe_type_sale_type_lookup,brand_shoe_type_sale_type_color_lookup)
+
+train <- Reduce(inner_join, lookups)
+
+average_drops <- c("product_look_id","brand_id","material_name","country_of_origin","color","brand_shoe_type","brand_shoe_type_sale_type","brand_shoe_type_sale_type_color")
+train <- train[ , !(names(train) %in% average_drops)]
+
+############################################### Test dataset #############################################################
+# Make lookup tables 
+product_look_id_lookup <- test %>% group_by(product_look_id) %>% summarise(product_look_id_avg=mean(num_units_sold))
+
+brand_id_lookup <- test %>% group_by(brand_id) %>% summarise(brand_id_avg=mean(num_units_sold))
+
+material_name_lookup <- test %>% group_by(material_name) %>% summarise(material_name_avg=mean(num_units_sold))
+
+country_of_origin_lookup <- test %>% group_by(country_of_origin) %>% summarise(country_of_origin_avg=mean(num_units_sold))
+
+color_lookup <- test %>% group_by(color) %>% summarise(color_avg=mean(num_units_sold))
+
+brand_shoe_type_lookup <- test %>% group_by(brand_shoe_type) %>% summarise(brand_shoe_type_avg=mean(num_units_sold))
+
+brand_shoe_type_sale_type_lookup <- test %>% group_by(brand_shoe_type_sale_type) %>% summarise(brand_shoe_type_sale_type_avg=mean(num_units_sold))
+
+brand_shoe_type_sale_type_color_lookup <- test %>% group_by(brand_shoe_type_sale_type_color) %>% summarise(brand_shoe_type_sale_type_color_avg=mean(num_units_sold))
+
+
+# Join lookup tables with test data
+lookups <- list(test, product_look_id_lookup, brand_id_lookup,material_name_lookup,country_of_origin_lookup,color_lookup,brand_shoe_type_lookup,brand_shoe_type_sale_type_lookup,brand_shoe_type_sale_type_color_lookup)
+
+test <- Reduce(inner_join, lookups)
+
+average_drops <- c("product_look_id","brand_id","material_name","country_of_origin","color","brand_shoe_type","brand_shoe_type_sale_type","brand_shoe_type_sale_type_color")
+test <- test[ , !(names(test) %in% average_drops)]
+
+```
+
+##### Convert `sale_type_key`,`return_policy_id`,`sale_month`,`shoe_type` into binary dummy variables.  
+
+```{r Convert_categorical2,message=FALSE,warning=FALSE}
+train_sparse_matrix <- sparse.model.matrix(num_units_sold~.-1, data = train)
+test_sparse_matrix <- sparse.model.matrix(num_units_sold~.-1, data = test)
+head(train_sparse_matrix)
+
+
+# Create the dependent vector
+train_output_vector <- train[,"num_units_sold"]
+test_output_vector <- test[,"num_units_sold"]
+
+```
+
+
+### Build the model
+
+```{r build_model,message=FALSE,warning=FALSE}
+set.seed(100)
+
+param <- list("objective" = "reg:linear",
+              "nthread" = 4,
+              "eta" = 0.1,
+              "subsample"=0.8,
+              "gamma" = 1,
+              "min_child_weight" = 2,
+              "max_depth"= 15
+)
+
+# Construct a watch list, use test error to measure the model quality to avoid overfitting during model training (similar to cross validation)
+dtrain <- xgb.DMatrix(data = train_sparse_matrix, label=train_output_vector)
+dtest <- xgb.DMatrix(data = test_sparse_matrix, label=test_output_vector)
+watchlist <- list(train=dtrain, test=dtest)
+
+bst <- xgb.train(param=param,data = dtrain, nrounds=25,watchlist=watchlist )
+
+```
+
+From my own experiment running on large rounds number that I know if the model running more than around 25 rounds,it will decrease `train-rmse` but increase `test-rmse` which means overfitting.
+
+### Model Evaluation  
+
+#### Predicting on test data
+We will apply this model to our test dataset to evaluate the model
+```{r predict_model,message=FALSE}
+y_pred <- predict(bst, test_sparse_matrix)
+
+# Round the sales prediction into integer 
+y_pred <- round(y_pred)
+
+# Predicted sales should not larger than number of units available.
+real_pred <- ifelse(y_pred > test$num_units_available,test$num_units_available,y_pred)
+
+r2 <- sum((real_pred - mean(test$num_units_sold))^2)/sum((test$num_units_sold - mean(test$num_units_sold))^2)
+
+
+print(paste("R square is ", r2))
+```
+
+#### Feature Importance
+```{r feature_importance,message=FALSE}
+# get the trained model
+model = xgb.dump(bst, with.stats=TRUE)
+# get the feature real names
+names = dimnames(train_sparse_matrix)[[2]]
+# compute feature importance matrix
+importance_matrix = xgb.importance(names, model=bst)
+
+# plot the top 10 features
+print(xgb.plot.importance(importance_matrix[1:15,]))
+
+```
+
+
+I only plot top 15 importance features, from the plot we could see that **prodcut_look_id_avg** is definitely the most important variable in terms of prediction power which make sense.
+Other important variables other average sale variables, **num_units_available**, **sale_duration**, **num_sizes**, **discount** also make sense.
+
+
+#### View the trees structure
+```{r tree,message=FALSE}
+#xgb.dump(bst)
+
+#xgb.plot.tree(model = bst)
+```
+
+
+### Save the model
+```{r save_model,message=FALSE}
+xgb.save(bst, "xgboost.model")
+#bst2 <- xgb.load("xgboost.model")
+#pred2 <- predict(bst2, test$data)
+
+```
+
+
+### Other tries:  
+1. Above is the model that I built in **tree booster**, I've tried **linear booster** as well which I did not list here since the R square is around 15% less than tree based model, I think that is because linear based model cannot catch some non-linear relationship between sales and independent variables;  
+
+2. From the complete feature importance plot that I find **shoe_type** almost have no importance in terms of Model gain. Therefore I remove it and re-built the model,whose prediction error is among the same as my previous model, for the sake of simplicity of the model, we could take **shoe_type** out if we want.
+
+
+
+
+### Further Modeling suggestions:    
+1. Change the numerical conversion type of some categorical variables, for example: we could also change `color` into binary dummy variables instead of replacing it by its average sales;  
+
+2. Use statistical tests to test on important variables to see if the result make sense;  
+
+3. Tuning more on XGBoost model parameters to get better prediction models. 
+
