@@ -1,0 +1,403 @@
+---
+title: "NEISS_Aanlytics"
+author: "Bowei.Zhang"
+date: "November 16, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Introduction
+
+In my spare time I will do some analytics projects using public data just for fun, this NEISS Analytics is one of them.
+
+CPSC's National Electronic Injury Surveillance System (NEISS) is a national probability sample of hospitals in the U.S. and its territories. Patient information is collected from each NEISS hospital for every emergency visit involving an injury associated with consumer products. From this sample, the total number of product-related injuries treated in hospital emergency rooms nationwide can be estimated. This web access to NEISS allows certain estimates to be retrieved on-line. These estimates can be focused by setting some or all of the following variables (and an example of each):
+
+**Date** (one year maximum range; e.g., how many injuries were treated in 1996)  
+**Product** (e.g., how many bicycle injuries occurred)  
+**Sex** (e.g., how many injuries occurred to women)  
+**Age** (e.g., how many injuries occurred to people aged 35-55)  
+**Diagnosis** (e.g., how many lacerations occurred)  
+**Disposition** (e.g., how many people were admitted to the hospital)  
+**Locale** (e.g., how many injuries occurred at a school)  
+**Body part** (e.g., how many injuries involved the knee)  
+
+
+This data was gathered from the United States Consumer Product Safety Commission's National Electronic Injury Surveillance System (NEISS) available [here](http://www.cpsc.gov/en/Research--Statistics/NEISS-Injury-Data/)
+
+Full methodology is included at the above link, this archive also includes the NEISS coding manual with further descriptions of the data and methodology.
+
+I also included all of the data that have been used in this analytics in **data** folder.
+
+Required Packages:
+```{r packages, message=FALSE, warning=FALSE}
+require(dplyr)    # For data wrangling
+require(ggplot2)  # For plots
+require(cowplot)  # For better arrange plots
+```
+
+### Data Preperation
+Input dataset
+```{r input}
+# Set working dictionary to target folder
+setwd("C:/Users/bowei.zhang/Desktop/ME/Career/Analytics_Example/NEISS/")
+
+# read sample data, and change all blanks into 'NA'
+neiss <- read.csv("C:/Users/bowei.zhang/Desktop/ME/Career/Analytics_Example/NEISS/data/NEISS2014.csv", header=T, na.strings=c("","NA"))
+
+# Look at the size of the data and data type of each variables
+str(neiss)
+
+# Take a look at typical value of each variables
+summary(neiss)
+
+# Loading lookup BodyParts lookup tables
+bodypart <- read.csv("C:/Users/bowei.zhang/Desktop/ME/Career/Analytics_Example/NEISS/data/BodyParts.csv", header=T, na.strings=c("","NA"))
+
+
+# Loading lookup Diagnosis lookup tables
+diagnosis <- read.csv("C:/Users/bowei.zhang/Desktop/ME/Career/Analytics_Example/NEISS/data/DiagnosisCodes.csv", header=T, na.strings=c("","NA"))
+
+
+# Loading lookup Disposition lookup tables
+disposition <- read.csv("C:/Users/bowei.zhang/Desktop/ME/Career/Analytics_Example/NEISS/data/Disposition.csv", header=T, na.strings=c("","NA"))
+
+
+# Join NEISS with lookup tables
+neiss <- left_join(neiss,bodypart,by = c("body_part" = "Code"))
+neiss <- left_join(neiss,diagnosis,by = c("diag" = "Code"))
+neiss <- left_join(neiss,disposition,by = c("disposition" = "Code"))
+```
+
+### Which parts of our body are safe and which are not?
+**What are the body parts most frequently represented in this dataset?**
+```{r question_1a}
+# Count Body Parts
+bodyPart_count <- count(neiss,BodyPart)
+
+# Change column name
+colnames(bodyPart_count)[2] <- "count"
+
+# Get top 5 most frequently body parts in the dataset
+arrange(bodyPart_count,desc(count))[1:5,]
+```
+
+**What are the body parts that are least frequently represented?**
+```{r question_1b}
+
+# Get top 5 least frequently body parts in the dataset
+arrange(bodyPart_count,count)[1:5,]
+```
+
+
+
+### Skateboard?
+Sometimes it worth to take deeper look at a specific consumer prodcut, for example, one of my favorite: skateboard
+```{r question_2a}
+# Filter injuries involve a skateboard, in order to do that, we define "narrative" column contains word 'SKATEBOARD' as injuries involve a skateboard
+skateboard <- filter(neiss, grepl('SKATEBOARD', narrative))
+# Count injuries involve a skateboard
+nrow(skateboard)
+```
+
+
+**Of those injuries, what percentage were male and what percentage were female?**
+```{r question_2b}
+# Percentage of male and female
+prop.table(table(skateboard$sex))
+```
+
+
+**What was the average age of someone injured in an incident involving a skateboard?**
+```{r question_2c}
+# In order to calculate average age, first we need to make sure all age value represent actual age since we have several age value are not from NEISSCodingManual (for example 201 = less than 8 weeks, 206 = 6 months, 218 = 18 months)
+max(skateboard$age)
+```
+So now we confirm that there are no value larger than 100, let's calculate average age:
+```{r question_2d}
+# Average age of someone injured in an incident involving a skateboard
+mean(skateboard$age)
+```
+
+
+### First look at diagnosis
+**What diagnosis had the highest hospitalization rate?**
+```{r question_3a}
+# In terms of disposition, hospitalization could mean either "Treated and transferred to another hospital" (code 2) or "Treated and admitted for hospitalization (within same facility)" (code 4)
+
+# Create a new variable to represent hospitalization, in this variable, we use 1 to represent hospitalization and 0 to represent not hospitalization.
+neiss$hospitalization <- ifelse(neiss$disposition == 2|neiss$disposition == 4, 
+c(1), c(0))
+
+#Now we group NEISS data by Diagnosis, and within each group, the 
+head(arrange(neiss %>% group_by(Diagnosis) %>% summarise(hospitalization_rate=mean(hospitalization)),desc(hospitalization_rate)))
+```
+We can see from the results that **Submersion** (42.59%) had the highest hospitalization rate 
+
+
+**What diagnosis most often concluded with the individual leaving without being seen?**
+```{r question_3b}
+# leaving without being seen is in "disposion" (code 6)
+head(sort(tapply(neiss$disposition, neiss$Diagnosis, function(x) prop.table(table(x))["6"]), decreasing = TRUE))
+
+```
+From above that we know **Poisoning** most concluded with the individual leaving without being seen (3.31%).  
+
+
+
+
+### Will age have an impact on reported injuries?
+
+It will be easier to tell if we visualize their relationship!
+```{r question_4a}
+# First we need convert all values to represent the real age
+neiss$plot_age <- ifelse(neiss$age > 200, 
+c(0), neiss$age)
+
+ggplot(data=neiss, aes(neiss$plot_age)) + 
+  geom_histogram(breaks=seq(0, 100, by = 30),
+                 col="red", 
+                 fill="green", 
+                 alpha = .2) + 
+  labs(title="Injury Distribution by Age") +
+  labs(x="Age", y="Injuries") 
+
+
+
+```
+
+
+I use 30 as bin width to divided age into 3 bins (Youth,Medium,Senior), from this chart we could know that people in **0-30 age group** (Youth) are more likely to get injury than medium or senior age group since their total injuries is larger than the sum of other 2 groups.
+
+
+
+If we take a deeper look at distribution:
+```{r question_4b}
+
+ggplot(data=neiss, aes(neiss$plot_age)) + 
+  geom_histogram(aes(y =..density..),breaks=seq(0, 100, by = 2),
+                 col="red", 
+                 fill="green", 
+                 alpha = .2) +  geom_density(col=2) + 
+  labs(title="Injury Distribution by Age") +
+  labs(x="Age", y="% Injuries") 
+```
+
+From the histogram above we could see that **newborn** (0-2) is the most dangerous age group in terms of getting injuries which make sense since they are not mature enough to detect dangers at that time.
+
+
+
+
+Now let's see if we could find the relationship between **Age** and **Injuries**
+```{r question_4c}
+# Create a age frequency table:
+age_freq <- as.data.frame(table(neiss$plot_age))
+colnames(age_freq) <- c("age", "frequency")
+age_freq$age <- as.numeric(age_freq$age)
+
+# Create a scatterplot to visualize it
+
+# Linear relationship
+ggplot(age_freq, aes(x=age,y=frequency)) + 
+geom_point(shape=1,alpha =0.5) +
+  labs(title="Age-Injury Relationship") +
+  labs(x="Age", y="Injuries") + 
+  geom_smooth(method=lm,se=FALSE)
+
+# A loess smoothed fit curve with confidence region
+ggplot(age_freq, aes(x=age,y=frequency)) + 
+geom_point(shape=1,alpha =0.5) +
+  labs(title="Age-Injury Relationship") +
+  labs(x="Age", y="Injuries") + 
+  geom_smooth()
+```
+
+
+From the scatterplot we could see that injuries will decrease if age increase, it is almost a linear relatinoship given some outliers, there is a hill from **age 10** to **age 18**,which indicates that children in this age range are more active and risky on consumer product electric injuries.
+
+
+
+
+### Location?  
+We only have location code in dataset, but we could find specific location information in Manual, let's explore:
+```{r question_5a}
+# Make location reference table first:
+location <- c(1,2,4,5,6,7,8,9,0)
+locationValue <- c('Home','Farm/Ranch','Street/highway','Other public property','Manufactured(Mobile) home','Industrial place','School','Place of recreation or sports','Not recorded')
+location_lookup <- data.frame(location,locationValue)
+
+# Add location information to main dataset
+neiss <- left_join(neiss,location_lookup,by = c("location" = "location"))
+
+# Let's find out where is the most dangerous place
+ggplot(data=neiss, aes(locationValue)) + 
+   geom_bar() + 
+   labs(title="Injury Distribution by Location") + 
+  theme(axis.title.x = element_blank(), legend.title=element_blank(),
+              axis.text.x= element_text(angle=45, hjust = 1)) +
+   labs(x="Location", y="Injuries")
+
+```
+
+It seems like `home` is the most "dangerous" place, but it could due to we spend most time at home. `place of recreationor sports` and `school` are also on top 3.  
+
+
+
+Does location have impact on type of injuries?
+
+```{r question_5b}
+# Count Diagnosis
+Diagnosis_count <- count(neiss,Diagnosis)
+
+# Change column name
+colnames(Diagnosis_count)[2] <- "count"
+
+# Use most frequent diagnosis to find location differences
+neiss_freq_Diagnosis <- subset(neiss, Diagnosis %in% arrange(Diagnosis_count,desc(count))[1:10,]$Diagnosis)
+ggplot(data =neiss_freq_Diagnosis, aes(x = locationValue, col="black",fill = Diagnosis)) + geom_bar(aes(fill = Diagnosis), position = 'fill') +  theme(axis.title.x = element_blank(), legend.title=element_blank(),
+              axis.text.x= element_text(angle=45, hjust = 1)) + labs(x = "location",y = "% Injuries")
+
+```
+
+From the chart we could see more `Fracture` at a `Farm/Ranch`; More `Strain` or `Contusions` at a `Manufactured (Mobile) home`; Also be careful to sharp object, especially at `home` since 1/4 of home injuries are coming from `Laceration`.  
+
+
+
+Does location have gender differences in terms of injuries?
+```{r question_5c}
+ggplot(data =neiss, aes(x = locationValue, col="black",fill = sex)) + geom_bar(aes(fill = sex), position = 'fill') +  theme(axis.title.x = element_blank(), legend.title=element_blank(),
+              axis.text.x= element_text(angle=45, hjust = 1)) + labs(x = "location",y = "% Injuries")
+```
+
+We do see gender differences here: `Street/highway`,`Place of recreation or sports` and `industrial place` do have more **male** injuries  while `Manufactured (Mobile) home` and `Other public property` have more **female** injuries. Which make sense since there are more male sports fans and workers.
+
+
+### Does these injuries time sensitive?
+Let's take a look at injuries occured over time
+```{r question_5d}
+
+neiss$trmt_date <- as.Date(neiss$trmt_date, format = "%m/%d/%y")
+
+ggplot(data=neiss, aes(neiss$trmt_date)) + 
+   geom_histogram(aes(y =..density..),binwidth = 30,
+                  col="red", 
+                  fill="green", 
+                  alpha = .2) +  geom_density(col=2) + 
+   labs(title="Injury Distribution over time") +
+   labs(x="Time", y="% Injuries")
+```
+
+
+It look like that there are some seasonalities in the data, **spring** and **autumn**  will have more injuries compare to summer and winter, it might due to temperature changes in **spring** and **autumn** are more dramastic.
+
+
+
+### How about gender?
+```{r question_5e}
+ggplot(data =neiss, aes(x = sex)) + 
+    geom_bar()+labs(x = "Sex",y = "Injuries") 
+
+ ggplot(data =neiss, aes(x = sex, fill = race)) + 
+    geom_bar()+labs(x = "Gender",y = "Injuries") 
+
+ ggplot(data =neiss, aes(x = sex, fill = race)) + geom_bar(aes(fill = race), position = 'fill') +labs(x = "Gender",y = "% Injuries")
+
+```
+
+Basically `Male` is more likely get injuries compare to `Female` (1/6 chance higher) which also make sence since `Male` are more bold and careless than `Female` which will cause more potential injuries. 
+The race distribution in 2 genders are pretty even.  
+
+Let's go deeper into other variables:
+
+
+```{r question_5f}
+# Use most frequent body parts to find gender differences
+neiss_freq_bodyPart <- subset(neiss, BodyPart %in% arrange(bodyPart_count,desc(count))[1:15,]$BodyPart)
+
+ggplot(data =neiss_freq_bodyPart, aes(x = sex, col="black",fill = BodyPart)) + geom_bar(aes(fill = BodyPart), position = 'fill') +labs(x = "Gender",y = "% Injuries") 
+```
+
+From the bar chart above we could find that **female** tend to have more injuries in their **lower trunk** (`Trunk,lower`, `Ankle`), while **male** tend to have more injuries in their **upper trunk** (`Face`,`Finger`) 
+
+
+```{r question_5g}
+
+ggplot(data =neiss_freq_Diagnosis, aes(x = sex, col="black",fill = Diagnosis)) + geom_bar(aes(fill = Diagnosis), position = 'fill') +labs(x = "Gender",y = "% Injuries")
+
+
+```
+
+In terms of Diagnosis, **female** will have more `Contusions` and `Strain` while **male** will have more `Laceration`  
+
+
+
+
+### Hospital size?
+Variable `stratum` record the size of hospital that the injury will be treated:  
+`S` is Small hospital  
+`M` is Medium hospital  
+`L` is Large hospital  
+`V` is Very large hospital  
+`C` is Chilren's hospital  
+
+```{r question_5h}
+ggplot(data =neiss_freq_Diagnosis, aes(x = stratum, fill = Diagnosis)) + 
+    geom_bar()+labs(x = "Hospital Size",y = "Injuries") 
+
+ggplot(data =neiss_freq_Diagnosis, aes(x = stratum, fill = Diagnosis)) + geom_bar(aes(fill = Diagnosis), position = 'fill') +labs(x = "Hospital Size",y = "% Injuries")
+
+```
+
+From the graph that we could see people are tend to go very large hospital. Specifically, `Contusions` tend to be treated in small hospital since it only require simple treatment and equipments while `Internal organ injury` always require complex medical procedure, even surgery, which only larger hospitals could satisfy the requirement.
+
+
+### Any dangerous products?
+
+```{r question_5i}
+load("C:/Users/bowei.zhang/Desktop/ME/Career/Analytics_Example/NEISS/data/products.rda")
+neiss <- left_join(neiss,products,by = c("prod1" = "code"))
+
+# Let's find out top 10 frequent products that involved injuries
+Product_count <- count(neiss,title)
+colnames(Product_count)[2] <- "count"
+arrange(Product_count,desc(count))[1:10,]
+```
+
+It is not surprise that most dangerous products are most common ones: `stairs`,`floors`,`bed`, `basketball`, `bicycle`, `chairs`, `knives`
+
+
+**Does product have gender differences?**
+```{r question_5j}
+# Use most frequent products to find gender differences
+neiss_freq_product <- subset(neiss, title %in% arrange(Product_count,desc(count))[1:10,]$title)
+ggplot(data =neiss_freq_product, aes(x = sex, col="black",fill = title)) + geom_bar(aes(fill = title), position = 'fill') +  theme(axis.title.x = element_blank(), legend.title=element_blank(),
+              axis.text.x= element_text(angle=45, hjust = 1)) + labs(x = "Gender",y = "% Injuries")
+```
+
+Gender do have huge impact on products!  
+**male** has more injuries involved **sports** (`basketball`,`football` and `bicycles`) while **female** is more involved with **furnitures** (`bed`,`stairs`)
+
+
+**Does product have location differences?**
+```{r question_5k}
+# Use most frequent products to find location differences
+
+ggplot(data =neiss_freq_product, aes(x = locationValue, col="black",fill = title)) + geom_bar(aes(fill = title), position = 'fill') +  theme(axis.title.x = element_blank(), legend.title=element_blank(),
+               axis.text.x= element_text(angle=45, hjust = 1)) + labs(x = "Location",y = "% Injuries")
+```
+
+Of course it has!  
+More `basketball` and `football` injuries in `Place of recreation and sports` and `school` as well;   
+Most injuries happened in `street/highway` are related to `bicycles` or similar;  
+Most injuries happened in `industrial place` are related to `floors or flooring materials` or similar.   
+
+
+
+
+
+
+
+
+
