@@ -1,0 +1,333 @@
+---
+title: "Data_challenge"
+author: "Bowei.Zhang"
+date: "September 4, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### Introduction
+This is part of data interview challenge that I did for Uber:  
+
+Uber's Driver team is interested in predicting which driver signups are most likely to start driving. To help
+explore this question, we have provided a sample dataset of a cohort of driver signups in January 2015.
+The data was pulled a few months after they signed up to include the result of whether they actually
+completed their first trip. It also includes several pieces of background information gather about the driver
+and their car.  
+We would like you to use this data set to help understand what factors are best at predicting whether a
+signup will start to drive, and offer suggestions to operationalize those insights to help Uber.
+
+Data description:  
+**id**: driver_id  
+**city_id** : city_id this user signed up in  
+**signup_os** : signup device of the user ("android", "ios", "website", "other")  
+**signup_channel** : what channel did the driver sign up from ("offline", "paid", "organic", "referral")  
+**signup_timestamp** : timestamp of account creation; local time in the form 'YYYYMMDD'  
+**bgc_date** : date of background check consent; in the form 'YYYYMMDD'  
+**vehicle_added_date** : date when driver's vehicle information was uploaded; in the form 'YYYYMMDD'  
+**first_trip_date** : date of the first trip as a driver; in the form 'YYYYMMDD'  
+**vehicle_make**: make of vehicle uploaded (i.e. Honda, Ford, Kia)  
+**vehicle_model**: model of vehicle uploaded (i.e. Accord, Prius, 350z)  
+**vehicle_year**: year that the car was made; in the form 'YYYY'  
+
+
+Required Packages:
+```{r packages, message=FALSE, warning=FALSE}
+require(ggplot2)  #For plots
+require(cowplot)  #For better arrange plots
+require(caTools)  #For stratify sampling 
+require(glmulti)  #For All Subset model selection
+require(ROCR)     #For generating ROC curve to evaluate the binary classifier
+```
+### Exploratory Analysis
+
+
+Input sample dataset
+
+```{r input}
+# read sample data, and change all blanks into 'NA'
+signup <- read.csv("C:/Users/bowei.zhang/Desktop/ME/Career/Analytics_Example/Data_Challenge/ds_challenge_v2_1_data.csv", header=T, na.strings=c("","NA"))
+
+# Look at the size of the data and data type of each variables
+str(signup)
+
+# Take a look at typical value of each variables
+summary(signup)
+```
+
+**Dependent Variable**  
+From the summary above we could see the whole dataset contains 54681 records with 11 vaiables, `first_completed_date` is the dependent variable that we want to predict, we will treat NA in `first_completed_date` as the driver who signup but do not have first trip, so we will make a new binary variable call `first_trip` with value `C` as a driver completed a first trip with Uber and value `N` as a driver does not complete a first trip with Uber 
+
+```{r binary_dependent}
+signup$first_trip <- as.factor(ifelse(is.na(signup$first_completed_date),"N","C"))
+```
+Now let's explore different independent variables:  
+**City Name**
+
+```{r city_name_plot}
+
+#Plot city_name to see first trip rate
+city_name1 <- ggplot()+ geom_bar(data =signup, aes(x = city_name, fill = first_trip)) +labs(x = "City Name",y = "Count")
+
+
+city_name2 <- ggplot(data =signup, aes(x = city_name, fill = first_trip)) + 
+    geom_bar(aes(fill = first_trip), position = 'fill')+labs(x = "City Name",y = "Percentage") 
+
+plot_grid(city_name1, city_name2, ncol = 2, nrow = 1)
+
+
+```
+
+
+From the plot we cuold see that **Strark** has the highest signups but **Berton** has the highest percetage first trip rate.
+
+
+**Signup Channel**
+
+```{r signup_channel_plot}
+
+#Plot signup_channel to see first trip rate
+signup_channel1 <- ggplot(data =signup, aes(x = signup_channel, fill = first_trip))+ geom_bar() +labs(x = "Signup Channel",y = "Count")
+
+
+signup_channel2 <- ggplot(data =signup, aes(x = signup_channel, fill = first_trip)) + 
+    geom_bar(aes(fill = first_trip), position = 'fill')+labs(x = "Signup Channel",y = "Percentage")
+
+plot_grid(signup_channel1, signup_channel2, ncol = 2, nrow = 1)
+
+
+```
+
+From the plots we could see that **Referral** has both highest first trip counts and rate, while **Paid** has highest signups but lowest first trip rate, which means **Referral** is the most efficient channel in terms of conversion rate(first trip rate), **Paid**, on the other hand, though we get nearly half signups from it,is the most unefficient channel.   
+
+
+**Signup OS**
+```{r signup_os_plot}
+
+#Plot signup_channel to see first trip rate
+signup_os1 <- ggplot(data =signup, aes(x = signup_os, fill = first_trip))+ geom_bar() +labs(x = "Signup OS",y = "Count") + theme(axis.text.x = element_text(angle=90, vjust=0.5))
+
+
+signup_os2 <- ggplot(data =signup, aes(x = signup_os, fill = first_trip)) + 
+    geom_bar(aes(fill = first_trip), position = 'fill')+labs(x = "Signup OS",y = "Percentage") + theme(axis.text.x = element_text(angle=90, vjust=0.5))
+
+
+plot_grid(signup_os1, signup_os2, ncol = 2, nrow = 1)
+
+
+```
+
+From the plots we could see that **Mac** has the highest first trip rate while **ios web** has the highest signups; And more than half signups coming from **mobile/tablet (andriod + ios)**
+
+
+
+
+### Modeling
+
+#### Feature Engineering    
+Since all data are coming from the same cohort, we will use date difference instead of multiple dates to measure the duration between signup and take action (background check or add vehicle), which represent their decision time.  
+We will have 2 new variables:  
+`bgc_duration` = `bgc_date` - `signup_date`  
+`vehicle_added_duration` = `vehicle_added_date` - `signup_date`
+
+```{r feature_engineering}
+
+signup$bgc_duration <- as.numeric(as.Date(as.character(signup$bgc_date), format="%m/%d/%y")-
+                  as.Date(as.character(signup$signup_date), format="%m/%d/%y"))
+
+signup$vehicle_added_duration <- as.numeric(as.Date(as.character(signup$vehicle_added_date), format="%m/%d/%y")-          as.Date(as.character(signup$signup_date), format="%m/%d/%y"))
+```
+
+
+#### Missing Value   
+
+For variables `vehicle_make`, `vehicle_model` and `vehicle_year`, since about _75% (41458/54681)_ are missing values, we just need to change them to binary variables (have value/missing value)
+
+```{r missing_value1}
+
+signup$have_vehicle_make <- as.factor(ifelse(is.na(signup$vehicle_make),"N","Y"))
+signup$have_vehicle_model <- as.factor(ifelse(is.na(signup$vehicle_model),"N","Y"))
+signup$have_vehicle_year <- as.factor(ifelse(is.na(signup$vehicle_year),"N","Y"))
+
+```
+For variables `bgc_duration`, `vehicle_added_duration`, we could assume that all missing values to be a very large number (since they maybe take action in the future), let's say _1000_
+
+```{r missing_value2}
+
+signup$bgc_duration <- ifelse(is.na(signup$bgc_duration),1000,signup$bgc_duration)
+signup$vehicle_added_duration <- ifelse(is.na(signup$vehicle_added_duration),1000,signup$vehicle_added_duration)
+
+```
+For variable `signup_os`, _12.5% (6857/54681)_ are missing value, since _98% (6709/6857)_ of the missing value are drivers without first trip, so we could ignore it
+
+```{r missing_value3}
+
+table(signup[is.na(signup$signup_os),]$first_trip)
+
+```
+
+#### Data Preparation for Model
+Select certain columns for building up a predictive modeling, `new_signup` will be out dataset for building up the model
+
+```{r data_preparation}
+new_columns <- c("city_name","signup_os","signup_channel","first_trip", "bgc_duration","vehicle_added_duration","have_vehicle_make","have_vehicle_model","have_vehicle_year" ) 
+new_signup <- signup[new_columns]
+str(new_signup)
+summary(new_signup)
+
+```
+
+#### Build up Predictive model  
+##### **Initial Thoughts**    
+The purpose of the model is to predict whether or not a driver signup will start driving, it is a classification problem.The dependent variable is binary, it is better to handle by **logistic regression** since it is more robust to binary output and really easy to interpret (We need to get insights from the model to generate more first trips, intepretable is as important as predictivity)  **The alternative method are Decision Tree/Random Forest, Support Vector Machine,K-Nearest Neighbor, Neural Networks and Boosting**
+
+```{r build_model, message=FALSE, warning=FALSE}
+set.seed(1)
+# Change dependent variable to 0 and 1 to fit logistic regression
+new_signup$first_trip <- ifelse(new_signup$first_trip =="C",1,0)
+
+# split train data (75%) and test data (25%)
+train_rows = sample.split(new_signup$first_trip, SplitRatio=0.75)
+train = new_signup[ train_rows,]
+test  = new_signup[!train_rows,]
+
+#Build up logistic regression
+
+model <- glm(first_trip~city_name+signup_os+signup_channel+bgc_duration+vehicle_added_duration+have_vehicle_year,family=binomial(link='logit'),data=train)
+summary(model)
+
+```
+
+##### **Variable Selection**
+
+From the model summary we could tell that some variables are not important to the model, let's first explore 3 binary independent variables `have_vehicle_make`,`have_vehicle_model`,`have_vehicle_year`:
+
+```{r variable_selection1}
+
+table(subset(new_signup,new_signup$have_vehicle_make == 'N')$have_vehicle_model)
+table(subset(new_signup,new_signup$have_vehicle_make == 'N')$have_vehicle_year)
+
+```
+From above we know that if `have_vehicle_make` is `N`, the 2 others are `N` as well, bacically we just need to use one of these three binary variables, we will use `have_vehicle_make` in the model later on.
+
+```{r variable_selection2, message=TRUE, warning=TRUE}
+
+cor(new_signup$bgc_duration,new_signup$vehicle_added_duration)
+
+```
+Above we check if there are correlation between 2 numeric variables:`bgc_duration` and `vehicle_added_duration` to avoid multicollinearity, fortunately they are not highly correlated.  
+
+
+So now for the rest of the variables, since the size of variables and dataset are small, let's use **All Subset Variable Selection** method to select best variables for this model.
+```{r variable_selection3, message=FALSE, warning=FALSE}
+
+glmulti.logistic.out <-
+    glmulti(first_trip~city_name+signup_os+signup_channel+bgc_duration+vehicle_added_duration+have_vehicle_make, 
+            data = train,
+            level = 1,               # No interaction considered
+            method = "h",            # Exhaustive approach
+            crit = "aic",            # AIC as criteria
+            confsetsize = 5,         # Keep 5 best models
+            #plotty = F, report = F,  # No plot or interim reports
+            fitfunction = "glm",     # glm function
+            family = binomial)       # binomial family for logistic regression
+
+```
+
+The picture above shows AIC for top 5 performance models, let's take a look on them:
+```{r variable_selection4, message=TRUE, warning=TRUE}
+
+glmulti.logistic.out@formulas
+
+
+```
+In terms of **AIC**, since No.1 model is almost the same as No.2, so `city_name` is not important to the model, for simplicity, we will use No.2 model.    
+
+
+
+##### Evaluating the model
+
+```{r evaluate_model1, message=TRUE, warning=TRUE}
+best_model <- glmulti.logistic.out@objects[[2]]
+# Evaluating model on test dataset and setting up decision boundary to be 0.5
+fitted.results <- predict(best_model,newdata=test,type='response')
+fitted.results <- ifelse(fitted.results > 0.5,1,0)
+fitted.results <- na.omit(fitted.results)
+
+misClasificError <- mean(fitted.results != test$first_trip)
+print(paste('Accuracy',1-misClasificError))
+
+
+```
+We setup threshhold to be _0.5_ and get accuracy 0.785 (the classifier could label 78.5% of the test data correctly), which is pretty well in terms of logistic model, I could change the threshold or even running **cross validation** to improve the accuracy.  
+Now let's double check model performance by looking at its **ROC curve** and calculate **AUC**:
+```{r evaluate_model2, message=TRUE, warning=TRUE}
+p <- predict(best_model, newdata=test, type="response")
+pr <- prediction(p, test$first_trip)
+prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+plot(prf,main="ROC Curve")
+
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+print(paste('AUC',auc))
+
+```
+For **ROC Curve**, X axis is **False Positive Rate** and Y axis is **Ture Positive Rate**
+We could see AUC (0.97) is pretty close to 1 which means the performance is really well.    
+
+
+##### Interpreting the model    
+
+Now let's take a closer look at No.2 model and its table of deviance (Chi Square Test)
+```{r interpret_model1, message=FALSE, warning=FALSE}
+
+summary(best_model)
+
+anova(best_model, test="Chisq")
+
+```
+From above we could learn:  
+
+###### **Signup OS**  
+The deviance table shows `Signup_OS` is an important variable which reduce residual deviance 133.8 by adding it.  
+Summary table tell us that drive signup from **desktop (Windows and Mac)** will have more log odds (0.419 and 0.473, respectively) to convert, which match the conclusion from exploratory analysis (Mac and Windows are among the top in terms of first trip rate ), though we acquired more signups from **mobile/tablet (IOS and Andriod)**   
+
+###### **Signup Channel**  
+The deviance table shows `Signup_channel` is an highly important variable which reduce residual deviance 2083.4 by adding it.  
+Summary table tell us that driver coming from **Referral** will have more log odds (0.529) to convert while **Paid** will have less log odds (-0.168), which also match our conclusion from exploratory analysis (**Referral** is the most efficient channel and **Paid** is the worst)      
+
+###### **BGC Duration and Vehicle Added Duration**  
+These two variables represent the consideration time after signup, both of them are pretty significant from the deviance table.  
+Summary table tell us that both of them have negtive influence on first trip (-0.136 and -0.033), which make sense. Since the more time you consider, the less possible you will try it.       
+
+###### **Have Year Make**   
+This one could be the most confused variable, we could see it is super important variable(reduce residual deviance 9932.5 by adding it), the summary said "have year make" has negtive effect on first trip which does not make sense, we need to take a closer look at both value equals _Y_ and _N_:
+
+```{r interpret_model2, message=FALSE, warning=FALSE}
+
+table(subset(new_signup,new_signup$have_vehicle_make == 'Y')$first_trip)
+table(subset(new_signup,new_signup$have_vehicle_make == 'N')$first_trip)
+
+```
+The first table is first trip distribution when a driver have vehicle make information while second table is is first trip distribution when a driver does have, clearly we could see that if a dirver does not have vehicle make information most likely (99.4%) mean he would not have first trip, there is no doubt that having vehicle make information will significantly increase the possibility of first trip,I think the reason why `have_vehicle_makeY` have a negtive parameter is due to _Perfect Separation_. Since most of values are _N_ in `have_vehicle_make` and most of the values are _0_ in `first_trip` (the dataset is _too sparse_).  
+So we could conclude that driver with vehicle information (make, model and year) are more likely to have first trip, which make sense since driver will provide more information is he is interested in Uber.      
+
+
+
+### Insights and Actions
+1. **Uber should re-allocate some money from other channel (like Paid) to referral** since it is the most efficient channel in term of getting first trip. Possible methods could be **increasing referral bonus and decrease Paid cost**. However, we also need to think about the **Cost per First Visit** from each channel which we cannot get from current dataset.    
+
+2. Desktop user have higher first trip rate but lower signups mean desktop user have higher quality than mobile/tablet user. Maybe mobile/tablet UI is easier for signup but desktop not, or maybe Uber is more advertising on mobile/tablet than desktop. Both reasons means **Uber need to focus on desktop, either UI design or Advertising, to get more signups on desktop.**
+
+3. Since conderation time matters,**Uber need to continually keep drivers' attention by**   
+**A. Regularly send out email reminder after signup about background check and add vehicle**  
+**B. give small bonus to rewarding the driver who take action (background check/add vehicle or even first trip) within a short period (like one week, two weeks or a month).**  
+
+
+
+
+
