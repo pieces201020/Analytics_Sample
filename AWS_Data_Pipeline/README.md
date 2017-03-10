@@ -4,3 +4,6 @@
 ### URL -> AWS S3 -> AWS Redshift
 ### AWS S3 -> AWS EC2 (Computation) -> AWS S3
 
+
+
+### Also the deployed package for AWS Lambda

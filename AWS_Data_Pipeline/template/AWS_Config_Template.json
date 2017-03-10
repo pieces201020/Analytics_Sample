@@ -1,0 +1,33 @@
+
+{
+  
+  "s3Staging": {
+    
+    "aws_access_key_id": "Dummy",
+    
+    "aws_secret_access_key": "Dummy",
+
+    "bucket":"Dummy",
+
+    "key": "Dummy",
+    
+    "path": "s3://3Dummy",
+
+    "region": "us-east-1"
+  },
+  
+  "copyTarget": {
+    "clusterEndpoint": "Dummy.us-east-1.redshift.amazonaws.com",
+    "clusterPort": 5439,
+    
+    "connectPwd": "Dummy",
+    "connectUser": "masteruser",
+    "db": "dev",
+    "schemaName": "public",
+    "tableName": "Dummy",
+    "staging_tableName": "Dummy"
+  }
+}
+
+
+
