@@ -14,4 +14,4 @@
 *Test Duration(optional)*  
 
 ### Preview:
-![alt text](https://github.com/pieces201020/Analytics_Sample/blob/master/SampleSize%20Calculator/sample_size_estimator.jpeg)
+![alt text](https://github.com/pieces201020/Analytics_Sample/blob/master/AB_Test_Sample_Size_Calculator/sample_size_estimator.jpeg)
