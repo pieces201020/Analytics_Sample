@@ -1,4 +1,4 @@
-# [Sample Size Estimator](https://bowei-zhang.shinyapps.io/sample_size_estimator/)
+# [Sample Size Estimator for A/B Testing](https://bowei-zhang.shinyapps.io/sample_size_estimator/)
 
 ## A tool for calculating sufficient Sample Size for A/B Testing
 
